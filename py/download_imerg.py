@@ -8,7 +8,7 @@ ftp.cwd('NRTPUB/imerg')
 
 for imerg_type in ['early', 'late']:
     ftp.cwd(imerg_type)
-    dest = '../data/imerg/' + imerg_type
+    dest = '../big_data/imerg/' + imerg_type
     
     
     # get directories names (one directory per month, e.g. '201503'):
