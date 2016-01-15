@@ -9,13 +9,12 @@ ftp.cwd('NRTPUB/imerg')
 for imerg_type in ['early', 'late']:
     ftp.cwd(imerg_type)
     dest = '../big_data/imerg/' + imerg_type
-    
-    
+
     # get directories names (one directory per month, e.g. '201503'):
     lines = []
     ftp.dir(lines.append)
     dirnames = [line.split()[-1] for line in lines]
-    
+
     # copy files from every FTP directory to destination directory:
     for dirname in dirnames:
         ftp.cwd(dirname)
