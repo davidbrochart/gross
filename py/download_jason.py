@@ -12,7 +12,7 @@ dest = '../big_data/jason2/gdr'
 lines = []
 ftp.dir(lines.append)
 dirnames = [line.split()[-1] for line in lines]
-dirnames = [dirname for dirname in dirnames if dirname.startswith('cycle') and int(dirname[5:]) >= 240]
+dirnames = [dirname for dirname in dirnames if dirname.startswith('cycle') and int(dirname[5:]) >= 246]
 
 # copy files from every FTP directory to destination directory:
 for dirname in dirnames:
