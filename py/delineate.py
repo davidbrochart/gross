@@ -14,6 +14,8 @@ def delineate(lat, lon, sub_latlon=[], accDelta=10000):
         samples = np.empty((1024, 2), dtype=np.float64)
         labels= np.empty((1024, 3), dtype=np.int32)
         sub_latlon = np.empty((1, 2), dtype=np.float64)
+        dirNeighbors = np.empty(1024, dtype=np.uint8)
+        accNeighbors = np.empty(1024, dtype=np.uint32)
         # output mask ->
         mxw = 3000 # bytes
         myw = mxw * 8 # bits
@@ -31,14 +33,12 @@ def delineate(lat, lon, sub_latlon=[], accDelta=10000):
         dir_tile, acc_tile = getTile(lat, lon)
         _, _, _, _, lat0, lon0, pix_deg = getTileInfo(lat, lon)
         print('Getting bassin partition...')
-        ws_mask = np.empty((1, myw, mxw), dtype=np.uint8)
-        ws_latlon = np.empty((1, 2), dtype=np.float64)
-        samples, labels, sample_size, mm, mm_back, mx0_deg, my0_deg, ws_mask, ws_latlon = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg)
+        samples, labels, sample_size, mm, mm_back, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors)
         print('Delineating sub-bassins...')
         watersheds = []
         getSubBass = False
         for sample_i in tqdm(range(sample_size)):
-            samples, labels, sample_size, mm, mm_back, mx0_deg, my0_deg, ws_mask, ws_latlon = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg)
+            samples, labels, sample_size, mm, mm_back, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors)
             ws = {}
             ws['mask'] = ws_mask
             ws['label'] = labels[sample_i]
@@ -68,7 +68,7 @@ def delineate(lat, lon, sub_latlon=[], accDelta=10000):
 #    return LineString(stream).length
 
 @jit(nopython=True)
-def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg):
+def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors):
     if getSubBass:
         x, y, x_deg, y_deg = getXY(lat, lon, lat0, lon0, pix_deg)
         acc = int(acc_tile[y,  x])
@@ -93,8 +93,6 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
             mx = int(round((x_deg - mx0_deg) / pix_deg))
             my = int(round((my0_deg - y_deg) / pix_deg))
     neighbors_i = 0
-    dirNeighbors = np.empty(1024, dtype=np.uint8)
-    accNeighbors = np.empty(1024, dtype=np.uint32)
     dirNeighbors[0] = 255 # 255 is for uninitialized
     accNeighbors[0] = 0
     done = False
@@ -199,12 +197,12 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
                 samples[:sample_size] = samples[sample_size-1::-1].copy()
                 labels[:sample_size] = labels[sample_size-1::-1].copy()
                 sample_i = 0
-                ws_mask, ws_latlon = np.empty((1, 1), dtype = np.uint8), [0., 0.]
+                ws_mask, ws_latlon = np.empty((1, 1), dtype=np.uint8), [0., 0.]
             else:
                 mm[:] &= ~mm_back[:]
                 ws_mask, ws_lat, ws_lon = get_bbox(mm, pix_deg, mx0_deg, my0_deg)
                 ws_latlon = [ws_lat, ws_lon]
-    return samples, labels, sample_size, mm, mm_back, mx0_deg, my0_deg, ws_mask, ws_latlon
+    return samples, labels, sample_size, mm, mm_back, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors
 
 @jit(nopython=True)
 def getXY(lat, lon, lat0, lon0, pix_deg):
@@ -297,15 +295,48 @@ def find_first1(x):
 
 @jit(nopython=True)
 def get_bbox(mm, pix_deg, mx0_deg, my0_deg):
-    x0 = mm.shape[1] * 8
-    y1 = -1
-    x1 = -1
-    for i in range(mm.shape[0]):
+    going_down = True
+    i = mm.shape[0] >> 1
+    i0 = i
+    i1 = i - 1
+    done = False
+    while not done:
         for j in range(mm.shape[1]):
             if mm[i, j] != 0:
-                y0 = i
-                if y1 < 0:
-                    y1 = i
+                done = True
+        if not done:
+            if going_down:
+                i0 += 1
+                i = i1
+            else:
+                i1 -= 1
+                i = i0
+            going_down = not going_down
+    if i > 0:
+        i -= 1
+    done = False
+    while not done:
+        done = True
+        for j in range(mm.shape[1]):
+            if mm[i, j] != 0:
+                done = False
+        if not done:
+            i -= 1
+            if i < 0:
+                done = True
+    i += 1
+
+    x0 = mm.shape[1] * 8
+    x1 = -1
+    y0 = -1
+    y1 = -1
+    found_y = False
+    done = False
+    while not done:
+        found_x = False
+        for j in range(mm.shape[1]):
+            if mm[i, j] != 0:
+                found_x = True
                 for k in range(8):
                     if (mm[i, j] >> k) & 1 == 1:
                         l = j * 8 + k
@@ -313,6 +344,17 @@ def get_bbox(mm, pix_deg, mx0_deg, my0_deg):
                             x0 = l
                         if x1 < l:
                             x1 = l
+        if found_x:
+            found_y = True
+            y0 = i
+            if y1 < 0:
+                y1 = i
+        if not found_x and found_y:
+            done = True
+        else:
+            i += 1
+            if i == mm.shape[0]:
+                done = True
     y0 += 1
     x1 += 1
     mask = np.empty((y0 - y1, x1 - x0), dtype=np.uint8)
