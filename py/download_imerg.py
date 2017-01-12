@@ -4,33 +4,35 @@ import os
 # connect to FTP server:
 ftp = ftplib.FTP('jsimpson.pps.eosdis.nasa.gov')
 ftp.login('david.brochart@gmail.com', 'david.brochart@gmail.com')
-ftp.cwd('NRTPUB/imerg/gis')
+ftp.cwd('NRTPUB/imerg')
 
-dest = '../big_data/imerg/gis/'
-os.makedirs(dest, exist_ok=True)
+for imerg_type in ['late']:#['early', 'late']:
+    ftp.cwd(imerg_type)
+    dest = '../big_data/imerg/' + imerg_type + '/hdf5/'
+    os.makedirs(dest, exist_ok=True)
 
-months_or_years = ['2015', '2016', '2017', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
-
-# copy files from every FTP directory to destination directory:
-def get_data():
+    # get directories names (one directory per month, e.g. '201503'):
     lines = []
     ftp.dir(lines.append)
-    names = [line.split()[-1] for line in lines]
-    for name in names:
-        if name in months_or_years:
-            ftp.cwd(name)
-            get_data()
-            ftp.cwd('..')
-        else:
-            if name.endswith('.V03E.30min.tif.gz'):
-                destname = dest + name
-                if not os.path.exists(destname):
-                    print('Downloading to ' + destname)
-                    destfile = open(destname, 'wb')
-                    ftp.retrbinary("RETR " + name, destfile.write)
-                    destfile.close()
-                else:
-                    print('File ' + destname + ' already downloaded')
+    dirnames = [line.split()[-1] for line in lines]
 
-get_data()
+    # copy files from every FTP directory to destination directory:
+    for dirname in dirnames:
+        ftp.cwd(dirname)
+        lines = []
+        ftp.dir(lines.append)
+        filenames = [line.split()[-1] for line in lines]
+        for filename in filenames:
+            destname = dest + filename
+            if not os.path.exists(destname):
+                print('Downloading to ' + destname)
+                destfile = open(destname, 'wb')
+                ftp.retrbinary("RETR " + filename, destfile.write)
+                destfile.close()
+            else:
+                print('File ' + destname + ' already downloaded')
+        ftp.cwd('..')
+
+    ftp.cwd('..')
+
 ftp.quit()
