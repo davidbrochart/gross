@@ -9,50 +9,53 @@ import rasterio
 from tqdm import tqdm
 
 def delineate(lat, lon, sub_latlon=[], accDelta=10000):
-        getSubBass = True
-        sample_i = 0
-        samples = np.empty((1024, 2), dtype=np.float64)
-        labels= np.empty((1024, 3), dtype=np.int32)
-        sub_latlon = np.empty((1, 2), dtype=np.float64)
-        dirNeighbors = np.empty(1024, dtype=np.uint8)
-        accNeighbors = np.empty(1024, dtype=np.uint32)
-        # output mask ->
-        mxw = 3000 # bytes
-        myw = mxw * 8 # bits
-        mm = np.empty((myw, mxw), dtype = np.uint8)
-        mm_back = np.empty((myw, mxw), dtype = np.uint8)
-        mx0_deg = 0
-        my0_deg = 0
-        # <- output mask
+    getSubBass = True
+    sample_i = 0
+    samples = np.empty((1024, 2), dtype=np.float64)
+    labels= np.empty((1024, 3), dtype=np.int32)
+    sub_latlon = np.empty((1, 2), dtype=np.float64)
+    dirNeighbors = np.empty(1024, dtype=np.uint8)
+    accNeighbors = np.empty(1024, dtype=np.uint32)
+    ws_latlon = np.empty(2, dtype=np.float64)
+    # output mask ->
+    mxw = 3000 # bytes
+    myw = mxw * 8 # bits
+    mm = np.empty((myw, mxw), dtype = np.uint8)
+    mm_back = np.empty((myw, mxw), dtype = np.uint8)
+    mx0_deg = 0
+    my0_deg = 0
+    # <- output mask
 
-        if len(sub_latlon) == 0:
-            sub_latlon[0] = [lat, lon]
+    if len(sub_latlon) == 0:
+        sub_latlon[0] = [lat, lon]
+    else:
+        sub_latlon = np.empty((len(sub_latlon), 2), dtype=np.float64)
+        sub_latlon[:] = sub_latlon
+    dir_tile, acc_tile = getTile(lat, lon)
+    _, _, _, _, lat0, lon0, pix_deg = getTileInfo(lat, lon)
+    print('Getting bassin partition...')
+    samples, labels, sample_size, mx0_deg, my0_deg, ws_mask, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors, ws_latlon)
+    print('Delineating sub-bassins...')
+    mask, latlon = [], []
+    getSubBass = False
+    for sample_i in tqdm(range(sample_size)):
+        _, _, _, mx0_deg, my0_deg, ws_mask, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors, ws_latlon)
+        mask.append(ws_mask)
+        latlon.append(ws_latlon)
+    ws = {}
+    ws['outlet'] = samples[sample_size - 1::-1]
+    ws['mask'] = mask[sample_size - 1::-1]
+    ws['latlon'] = np.empty((sample_size, 2), dtype=np.float32)
+    ws['latlon'][:, :] = latlon[sample_size - 1::-1]
+    # label reconstruction:
+    ws['label'] = []
+    for sample_i in range(sample_size - 1, -1, -1):
+        if sample_i == sample_size - 1: # outlet subbassin
+            ws['label'].append('0')
         else:
-            sub_latlon = np.empty((len(sub_latlon), 2), dtype=np.float64)
-            sub_latlon[:] = sub_latlon
-        dir_tile, acc_tile = getTile(lat, lon)
-        _, _, _, _, lat0, lon0, pix_deg = getTileInfo(lat, lon)
-        print('Getting bassin partition...')
-        samples, labels, sample_size, mm, mm_back, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors)
-        print('Delineating sub-bassins...')
-        watersheds = []
-        getSubBass = False
-        for sample_i in tqdm(range(sample_size)):
-            samples, labels, sample_size, mm, mm_back, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors)
-            ws = {}
-            ws['mask'] = ws_mask
-            ws['label'] = labels[sample_i]
-            ws['outlet'] = samples[sample_i]
-            ws['latlon'] = ws_latlon
-            watersheds.append(ws)
-        # label reconstruction:
-        for i in range(sample_size):
-            this_label = watersheds[i]['label']
-            if this_label[1] > 1: # this is not the outlet basin
-                this_label = watersheds[this_label[0]]['label'] + [this_label[2]]
-            else:
-                this_label = [this_label[2]]
-        return watersheds
+            i = labels[sample_i][0]
+            ws['label'].append(ws['label'][i] + ',' + str(labels[sample_i][2]))
+    return ws
 
 #def do_stream(self, lat, lon, lat0, lon0, olat, olon, dir_tile, pix_deg):
 #    x, y, x_deg, y_deg = getXY(lat, lon, lat0, lon0, pix_deg)
@@ -68,14 +71,14 @@ def delineate(lat, lon, sub_latlon=[], accDelta=10000):
 #    return LineString(stream).length
 
 @jit(nopython=True)
-def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors):
+def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors, ws_latlon):
     if getSubBass:
         x, y, x_deg, y_deg = getXY(lat, lon, lat0, lon0, pix_deg)
         acc = int(acc_tile[y,  x])
-        samples[0] = [y_deg - pix_deg / 2, x_deg + pix_deg / 2]
+        samples[0, :] = [y_deg - pix_deg / 2, x_deg + pix_deg / 2]
         rm_latlon(samples[0], sub_latlon, pix_deg)
         sample_i = 0
-        labels[0] = [-1, 1, 0] # iprev, size, new_label
+        labels[0, :] = [-1, 1, 0] # iprev, size, new_label
         label_i = 0
         new_label = 0
     else:
@@ -112,15 +115,15 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
                     acc = this_acc
                     sample_i += 1
                     if sample_i == samples.shape[0]:
-                        samples_new = np.empty((samples.shape[0] * 2, 2), dtype = np.float64)
-                        samples_new[:samples.shape[0]] = samples
+                        samples_new = np.empty((samples.shape[0] * 2, 2), dtype=np.float64)
+                        samples_new[:samples.shape[0], :] = samples
                         samples = samples_new
-                        labels_new = np.empty((labels.shape[0] * 2, 3), dtype = np.int32)
-                        labels_new[:labels.shape[0]] = labels
+                        labels_new = np.empty((labels.shape[0] * 2, 3), dtype=np.int32)
+                        labels_new[:labels.shape[0], :] = labels
                         labels = labels_new
-                    samples[sample_i] = [y_deg - pix_deg / 2, x_deg + pix_deg / 2]
+                    samples[sample_i, :] = [y_deg - pix_deg / 2, x_deg + pix_deg / 2]
                     rm_latlon(samples[sample_i], sub_latlon, pix_deg)
-                    labels[sample_i] = [label_i, labels[label_i, 1] + 1, new_label]
+                    labels[sample_i, :] = [label_i, labels[label_i, 1] + 1, new_label]
                     new_label = 0
                     label_i = sample_i
             else:
@@ -194,15 +197,14 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
             if getSubBass:
                 sample_size = sample_i + 1
                 # we need to reverse the samples (incremental delineation must go downstream)
-                samples[:sample_size] = samples[sample_size-1::-1].copy()
-                labels[:sample_size] = labels[sample_size-1::-1].copy()
+                samples[:sample_size, :] = samples[sample_size-1::-1, :].copy()
+                labels[:sample_size, :] = labels[sample_size-1::-1, :].copy()
                 sample_i = 0
-                ws_mask, ws_latlon = np.empty((1, 1), dtype=np.uint8), [0., 0.]
+                ws_mask = np.empty((1, 1), dtype=np.uint8)
             else:
                 mm[:] &= ~mm_back[:]
-                ws_mask, ws_lat, ws_lon = get_bbox(mm, pix_deg, mx0_deg, my0_deg)
-                ws_latlon = [ws_lat, ws_lon]
-    return samples, labels, sample_size, mm, mm_back, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors
+                ws_mask, ws_latlon[0], ws_latlon[1] = get_bbox(mm, pix_deg, mx0_deg, my0_deg)
+    return samples, labels, sample_size, mx0_deg, my0_deg, ws_mask, dirNeighbors, accNeighbors
 
 @jit(nopython=True)
 def getXY(lat, lon, lat0, lon0, pix_deg):
