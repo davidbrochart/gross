@@ -8,12 +8,11 @@ import numpy as np
 import rasterio
 from tqdm import tqdm
 
-def delineate(lat, lon, sub_latlon=[], accDelta=10000):
+def delineate(lat, lon, _sub_latlon=[], accDelta=10000):
     getSubBass = True
     sample_i = 0
     samples = np.empty((1024, 2), dtype=np.float32)
     labels= np.empty((1024, 3), dtype=np.int32)
-    sub_latlon = np.empty((1, 2), dtype=np.float32)
     dirNeighbors = np.empty(1024, dtype=np.uint8)
     accNeighbors = np.empty(1024, dtype=np.uint32)
     ws_latlon = np.empty(2, dtype=np.float32)
@@ -26,15 +25,18 @@ def delineate(lat, lon, sub_latlon=[], accDelta=10000):
     my0_deg = 0
     # <- output mask
 
-    if len(sub_latlon) == 0:
-        sub_latlon[0] = [lat, lon]
+    if len(_sub_latlon) == 0:
+        sub_latlon = np.empty((1, 2), dtype=np.float32)
+        sub_latlon[0, :] = [lat, lon]
     else:
-        sub_latlon = np.empty((len(sub_latlon), 2), dtype=np.float32)
-        sub_latlon[:] = sub_latlon
+        sub_latlon = np.empty((len(_sub_latlon), 2), dtype=np.float32)
+        sub_latlon[:, :] = _sub_latlon
     dir_tile, acc_tile = getTile(lat, lon)
     _, _, _, _, lat0, lon0, pix_deg = getTileInfo(lat, lon)
     print('Getting bassin partition...')
     samples, labels, sample_size, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors)
+    if not is_empty_latlon(sub_latlon):
+        print("WARNING: not all subbasins have been processed. This means that they don't fall into different pixels, or that they are not located in the basin. Please check their lat/lon coordinates.")
     print('Delineating sub-bassins...')
     mask, latlon = [], []
     getSubBass = False
@@ -81,6 +83,8 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
         labels[0, :] = [-1, 1, 0] # iprev, size, new_label
         label_i = 0
         new_label = 0
+        mx = 0
+        my = 0
     else:
         lat, lon = samples[sample_i]
         x, y, x_deg, y_deg = getXY(lat, lon, lat0, lon0, pix_deg)
@@ -110,6 +114,7 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
                 if this_accDelta >= accDelta and this_acc >= accDelta:
                     append_sample = True
                 if in_latlon([y_deg - pix_deg / 2, x_deg + pix_deg / 2], sub_latlon, pix_deg):
+                    rm_latlon([y_deg - pix_deg / 2, x_deg + pix_deg / 2], sub_latlon, pix_deg)
                     append_sample = True
                 if append_sample:
                     acc = this_acc
@@ -122,12 +127,11 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
                         labels_new[:labels.shape[0], :] = labels
                         labels = labels_new
                     samples[sample_i, :] = [y_deg - pix_deg / 2, x_deg + pix_deg / 2]
-                    rm_latlon(samples[sample_i], sub_latlon, pix_deg)
                     labels[sample_i, :] = [label_i, labels[label_i, 1] + 1, new_label]
                     new_label = 0
                     label_i = sample_i
             else:
-                if (mm_back[my, int(np.floor(mx / 8))] >> (mx % 8)) & 1 == 1: # we reached the upper sub-watershed
+                if (mm_back[my, int(np.floor(mx / 8))] >> (mx % 8)) & 1 == 1: # we reached the upper subbasin
                     reached_upper_ws = True
                 else:
                     mm[my, int(np.floor(mx / 8))] |= 1 << (mx % 8)
@@ -203,6 +207,7 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
                 sample_i = 0
                 ws_mask = np.empty((1, 1), dtype=np.uint8)
             else:
+                sample_size = 0
                 mm[:] &= ~mm_back[:]
                 ws_mask, ws_latlon[0], ws_latlon[1] = get_bbox(mm, pix_deg, mx0_deg, my0_deg)
     return samples, labels, sample_size, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors
@@ -267,17 +272,25 @@ def getTile(lat, lon):
 @jit(nopython=True)
 def in_latlon(ll, ll_list, prec):
     for i in range(ll_list.shape[0]):
-        if ll_list[i, 0] > -900:
+        if ll_list[i, 0] > -999:
             if (ll[0] - prec / 2 <= ll_list[i, 0] < ll[0] + prec / 2) and (ll[1] - prec / 2 <= ll_list[i, 1] < ll[1] + prec / 2):
+                print('Found sub_lat_lon' + str(ll))
                 return True
     return False
+
+def is_empty_latlon(ll_list):
+    for i in range(ll_list.shape[0]):
+        if ll_list[i, 0] > -999:
+            return False
+    return True
 
 @jit(nopython=True)
 def rm_latlon(ll, ll_list, prec):
     for i in range(ll_list.shape[0]):
-        if ll_list[i, 0] > -900:
+        if ll_list[i, 0] > -999:
             if (ll[0] - prec / 2 <= ll_list[i, 0] < ll[0] + prec / 2) and (ll[1] - prec / 2 <= ll_list[i, 1] < ll[1] + prec / 2):
                 ll_list[i] = [-999, -999]
+                return
 
 @jit(nopython=True)
 def go_get_dir(dire, dir_tile, x, y, mx, my, x_deg, y_deg, pix_deg):
