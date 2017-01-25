@@ -12,6 +12,7 @@ def delineate(lat, lon, _sub_latlon=[], accDelta=10000):
     getSubBass = True
     sample_i = 0
     samples = np.empty((1024, 2), dtype=np.float32)
+    lengths = np.empty(1024, dtype=np.float32)
     labels= np.empty((1024, 3), dtype=np.int32)
     dirNeighbors = np.empty(1024, dtype=np.uint8)
     accNeighbors = np.empty(1024, dtype=np.uint32)
@@ -34,50 +35,58 @@ def delineate(lat, lon, _sub_latlon=[], accDelta=10000):
     dir_tile, acc_tile = getTile(lat, lon)
     _, _, _, _, lat0, lon0, pix_deg = getTileInfo(lat, lon)
     print('Getting bassin partition...')
-    samples, labels, sample_size, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors)
+    samples, labels, lengths, sample_size, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, lengths, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors)
     if not is_empty_latlon(sub_latlon):
         print("WARNING: not all subbasins have been processed. This means that they don't fall into different pixels, or that they are not located in the basin. Please check their lat/lon coordinates.")
     print('Delineating sub-bassins...')
     mask, latlon = [], []
     getSubBass = False
     for sample_i in tqdm(range(sample_size)):
-        _, _, _, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors)
+        _, _, _, _, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors = do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, lengths, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors)
         mask.append(ws_mask)
         latlon.append(ws_latlon)
     ws = {}
     ws['outlet'] = samples[sample_size - 1::-1]
+    ws['length'] = lengths[:sample_size]
     ws['mask'] = mask[::-1]
     ws['latlon'] = np.empty((sample_size, 2), dtype=np.float32)
     ws['latlon'][:, :] = latlon[::-1]
     # label reconstruction:
     ws['label'] = []
-    for sample_i in range(sample_size - 1, -1, -1):
-        if sample_i == sample_size - 1: # outlet subbassin
+    for sample_i in range(sample_size):
+        if sample_i == 0: # outlet subbassin
             ws['label'].append('0')
         else:
             i = labels[sample_i][0]
             ws['label'].append(ws['label'][i] + ',' + str(labels[sample_i][2]))
     return ws
 
-#def do_stream(self, lat, lon, lat0, lon0, olat, olon, dir_tile, pix_deg):
-#    x, y, x_deg, y_deg = getXY(lat, lon, lat0, lon0, pix_deg)
-#    if olon - pix_deg / 2 <= lon < olon + pix_deg / 2 and olat - pix_deg <= lat < olat + pix_deg / 2:
-#        return 0
-#    stream = [[x_deg + pix_deg / 2, y_deg - pix_deg / 2]]
-#    done = False
-#    while not done:
-#        _, x, y, _, _, x_deg, y_deg = go_get_dir(dir_tile[y, x], dir_tile, x, y, 0, 0, x_deg, y_deg, pix_deg)
-#        stream.append([x_deg + pix_deg / 2, y_deg - pix_deg / 2])
-#        if olon - pix_deg / 2 <= x_deg < olon + pix_deg / 2 and olat - pix_deg <= y_deg < olat + pix_deg / 2:
-#            done = True
-#    return LineString(stream).length
+@jit(nopython=True)
+def get_length(lat, lon, lat0, lon0, olat, olon, dir_tile, pix_deg):
+    x, y, _, _ = getXY(lat, lon, lat0, lon0, pix_deg)
+    x_deg, y_deg = lon, lat
+    if (abs(olon - lon) < pix_deg / 4) and (abs(olat - lat) < pix_deg / 4):
+        return 0
+    length = 0.
+    done = False
+    while not done:
+        x_keep, y_keep = x, y
+        _, x, y, _, _, x_deg, y_deg = go_get_dir(dir_tile[y, x], dir_tile, x, y, 0, 0, x_deg, y_deg, pix_deg)
+        if x != x_keep and y != y_keep:
+            length += 1.4142135623730951
+        else:
+            length += 1.
+        if (abs(olon - x_deg) < pix_deg / 4) and (abs(olat - y_deg) < pix_deg / 4):
+            done = True
+    return length
 
 @jit(nopython=True)
-def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors):
+def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i, samples, labels, lengths, pix_deg, accDelta, sub_latlon, mm, mm_back, mx0_deg, my0_deg, dirNeighbors, accNeighbors):
     if getSubBass:
         x, y, x_deg, y_deg = getXY(lat, lon, lat0, lon0, pix_deg)
         acc = int(acc_tile[y,  x])
         samples[0, :] = [y_deg - pix_deg / 2, x_deg + pix_deg / 2]
+        lengths[0] = 0
         rm_latlon(samples[0], sub_latlon, pix_deg)
         sample_i = 0
         labels[0, :] = [-1, 1, 0] # iprev, size, new_label
@@ -126,8 +135,12 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
                         labels_new = np.empty((labels.shape[0] * 2, 3), dtype=np.int32)
                         labels_new[:labels.shape[0], :] = labels
                         labels = labels_new
+                        lengths_new = np.empty(lengths.shape[0] * 2, dtype=np.float32)
+                        lengths_new[:lengths.shape[0]] = lengths
+                        lengths = lengths_new
                     samples[sample_i, :] = [y_deg - pix_deg / 2, x_deg + pix_deg / 2]
                     labels[sample_i, :] = [label_i, labels[label_i, 1] + 1, new_label]
+                    lengths[sample_i] = get_length(y_deg - pix_deg / 2, x_deg + pix_deg / 2, lat0, lon0, samples[0, 0], samples[0, 1], dir_tile, pix_deg)
                     new_label = 0
                     label_i = sample_i
             else:
@@ -168,7 +181,7 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
                             passed_ws = False
                         # check if we are at a sub-basin outlet that we already passed
                         y_down, x_down = samples[label_i]
-                        if (y_down - pix_deg / 4 < y_deg - pix_deg / 2 < y_down + pix_deg / 4) and (x_down - pix_deg / 4 < x_deg + pix_deg / 2 < x_down + pix_deg / 4):
+                        if (abs(y_down - (y_deg - pix_deg / 2)) < pix_deg / 4) and (abs(x_down - (x_deg + pix_deg / 2)) < pix_deg / 4):
                             passed_ws = True
                     neighbors_i -= 1
                     nb = dirNeighbors[neighbors_i]
@@ -203,14 +216,13 @@ def do_delineate(lat, lon, lat0, lon0, dir_tile, acc_tile, getSubBass, sample_i,
                 sample_size = sample_i + 1
                 # we need to reverse the samples (incremental delineation must go downstream)
                 samples[:sample_size, :] = samples[sample_size-1::-1, :].copy()
-                labels[:sample_size, :] = labels[sample_size-1::-1, :].copy()
                 sample_i = 0
                 ws_mask = np.empty((1, 1), dtype=np.uint8)
             else:
                 sample_size = 0
                 mm[:] &= ~mm_back[:]
                 ws_mask, ws_latlon[0], ws_latlon[1] = get_bbox(mm, pix_deg, mx0_deg, my0_deg)
-    return samples, labels, sample_size, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors
+    return samples, labels, lengths, sample_size, mx0_deg, my0_deg, ws_mask, ws_latlon, dirNeighbors, accNeighbors
 
 @jit(nopython=True)
 def getXY(lat, lon, lat0, lon0, pix_deg):
@@ -225,7 +237,7 @@ def getXY(lat, lon, lat0, lon0, pix_deg):
 def getTileInfo(lat, lon):
     if (-56 <= lat <= 15) and (-93 <= lon <= -32): # South America
         lat0, lon0 = 15, -93
-        pix_deg = 0.004166666666667
+        pix_deg = 1 / 240 #0.004166666666667
         dir_url = 'http://earlywarning.usgs.gov/hydrodata/sa_15s_zip_grid/sa_dir_15s_grid.zip'
         acc_url = 'http://earlywarning.usgs.gov/hydrodata/sa_15s_zip_grid/sa_acc_15s_grid.zip'
         tile_width = 14640
@@ -270,25 +282,24 @@ def getTile(lat, lon):
     return tiles[0], tiles[1]
 
 @jit(nopython=True)
-def in_latlon(ll, ll_list, prec):
+def in_latlon(ll, ll_list, pix_deg):
     for i in range(ll_list.shape[0]):
-        if ll_list[i, 0] > -999:
-            if (ll[0] - prec / 2 <= ll_list[i, 0] < ll[0] + prec / 2) and (ll[1] - prec / 2 <= ll_list[i, 1] < ll[1] + prec / 2):
-                print('Found sub_lat_lon' + str(ll))
+        if ll_list[i, 0] > -900:
+            if (abs(ll[0] - ll_list[i, 0]) < pix_deg / 4) and (abs(ll[1] - ll_list[i, 1]) < pix_deg / 4):
                 return True
     return False
 
 def is_empty_latlon(ll_list):
     for i in range(ll_list.shape[0]):
-        if ll_list[i, 0] > -999:
+        if ll_list[i, 0] > -900:
             return False
     return True
 
 @jit(nopython=True)
-def rm_latlon(ll, ll_list, prec):
+def rm_latlon(ll, ll_list, pix_deg):
     for i in range(ll_list.shape[0]):
-        if ll_list[i, 0] > -999:
-            if (ll[0] - prec / 2 <= ll_list[i, 0] < ll[0] + prec / 2) and (ll[1] - prec / 2 <= ll_list[i, 1] < ll[1] + prec / 2):
+        if ll_list[i, 0] > -900:
+            if (abs(ll[0] - ll_list[i, 0]) < pix_deg / 4) and (abs(ll[1] - ll_list[i, 1]) < pix_deg / 4):
                 ll_list[i] = [-999, -999]
                 return
 
